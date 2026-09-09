@@ -120,21 +120,25 @@ def cmd_records(args: list[str]) -> None:
 def cmd_text(args: list[str]) -> None:
     conn = _connect()
     cur = conn.cursor()
-    q = """SELECT r.form_id, r.record_type, r.edid, s.sub_type, s.text
-           FROM strings s JOIN records r ON s.record_id = r.id"""
+    # search BOTH inline strings (mod plugins) and resolved lstrings (vanilla)
+    q = """SELECT r.form_id, r.record_type, r.edid, s.sub_type, s.text, 'inline' AS src
+           FROM strings s JOIN records r ON s.record_id = r.id
+           UNION ALL
+           SELECT r.form_id, r.record_type, r.edid, s.sub_type, s.text, 'resolved' AS src
+           FROM resolved_strings s JOIN records r ON s.record_id = r.id"""
     conds, params = [], []
     if "--search" in args:
-        conds.append("s.text LIKE ?")
+        conds.append("text LIKE ?")
         params.append(f"%{args[args.index('--search') + 1]}%")
     if "--type" in args:
-        conds.append("r.record_type = ?")
+        conds.append("record_type = ?")
         params.append(args[args.index("--type") + 1])
     if conds:
-        q += " WHERE " + " AND ".join(conds)
+        q = f"SELECT * FROM ({q}) AS t WHERE " + " AND ".join(conds)
     q += " LIMIT ?"
     params.append(int(args[args.index("--limit") + 1]) if "--limit" in args else 30)
-    for fid, rtype, edid, stype, text in cur.execute(q, params):
-        print(f"{fid:08X} {rtype:6s} {edid or '':40s} {stype:5s} {text[:120]}")
+    for fid, rtype, edid, stype, text, src in cur.execute(q, params):
+        print(f"{fid:08X} {rtype:6s} {edid or '':40s} {stype:5s} [{src:8s}] {text[:120]}")
 
 
 def cmd_refs(args: list[str]) -> None:
@@ -155,6 +159,14 @@ def cmd_refs(args: list[str]) -> None:
     print(f"references to {target:08X}: {len(rows)}")
     for fid, rtype, edid, pname, stype, off in rows:
         print(f"  {fid:08X} {rtype:6s} {edid or '':40s} {pname}  [{stype} @{off}]")
+
+
+def cmd_resolve(args: list[str]) -> None:
+    """Resolve localized lstring indices using .STRINGS tables."""
+    conn = _connect()
+    strings_dir = args[0] if args else "/tmp/fo4-strings/STRINGS"
+    n = db.resolve_localized_strings(conn, strings_dir)
+    print(f"resolved {n} strings")
 
 
 def cmd_freshness(args: list[str]) -> None:
@@ -213,7 +225,7 @@ def main() -> None:
     cmd = sys.argv[1]
     args = sys.argv[2:]
     {"ingest": cmd_ingest, "records": cmd_records, "text": cmd_text,
-     "refs": cmd_refs, "freshness": cmd_freshness, "stats": cmd_stats}.get(cmd, lambda a: print(__doc__))(args)
+     "refs": cmd_refs, "resolve": cmd_resolve, "freshness": cmd_freshness, "stats": cmd_stats}.get(cmd, lambda a: print(__doc__))(args)
 
 
 if __name__ == "__main__":

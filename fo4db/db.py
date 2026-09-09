@@ -66,6 +66,21 @@ CREATE TABLE IF NOT EXISTS refs (
     target_form_id INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS string_tables (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    plugin_id INTEGER NOT NULL REFERENCES plugins(id),
+    table_type TEXT NOT NULL,
+    source TEXT NOT NULL,
+    UNIQUE (plugin_id, table_type)
+);
+
+CREATE TABLE IF NOT EXISTS resolved_strings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    record_id INTEGER NOT NULL REFERENCES records(id),
+    sub_type TEXT NOT NULL,
+    text TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_records_type ON records(record_type);
 CREATE INDEX IF NOT EXISTS idx_records_edid ON records(edid);
 CREATE INDEX IF NOT EXISTS idx_strings_text ON strings(text);
@@ -181,6 +196,77 @@ def build_references(conn: sqlite3.Connection) -> int:
     )
     conn.commit()
     return len(rows)
+
+
+def resolve_localized_strings(conn: sqlite3.Connection, strings_dir: str) -> int:
+    """Resolve lstring indices for localized plugins using .STRINGS tables.
+
+    Vanilla esms are localized (TES4 flag 0x80): FULL/DESC/etc. are u32
+    indices into the string tables (in the game's BA2 or loose
+    Data/strings/). Mod plugins use inline strings and are skipped.
+    Returns the number of resolved strings.
+    """
+    from . import stringtable
+
+    tables = stringtable.load_all(strings_dir)
+    if not tables:
+        return 0
+
+    cur = conn.cursor()
+    cur.execute("DELETE FROM resolved_strings")
+    cur.execute("DELETE FROM string_tables")
+
+    # which plugins are localized? check TES4 flags (0x80)
+    # (separate cursors: the inner tes4 query would rebind the outer
+    #  iteration cursor and kill it — same bug class as build_references)
+    plug_cur = conn.cursor()
+    tes4_cur = conn.cursor()
+    localized: dict[int, str] = {}
+    for pid, name in plug_cur.execute("SELECT id, name FROM plugins"):
+        tes4 = tes4_cur.execute(
+            "SELECT flags FROM records WHERE plugin_id = ? AND record_type = 'TES4'",
+            (pid,),
+        ).fetchone()
+        if tes4 and tes4[0] & 0x80:
+            localized[pid] = name
+
+    count = 0
+    # separate cursors: the INSERT inside the loop would rebind the
+    # iteration cursor and kill it after the first row (same bug class
+    # as build_references, 2026-09-09).
+    sel = conn.cursor()
+    ins = conn.cursor()
+    for pid, pname in localized.items():
+        for ttype, table in tables.items():
+            ins.execute(
+                "INSERT OR REPLACE INTO string_tables (plugin_id, table_type, source) "
+                "VALUES (?, ?, ?)",
+                (pid, ttype, strings_dir),
+            )
+        # resolve lstring subrecords: FULL/DESC/SNAM/BTXT/ITXT/TNAM/RNAM/INAM/UNAM/MNAM/NNAM/XNAM/CNAM/ANAM
+        lstring_types = ("FULL", "DESC", "SNAM", "BTXT", "ITXT", "TNAM", "RNAM", "INAM", "UNAM", "MNAM", "NNAM", "XNAM", "CNAM", "ANAM")
+        for rid, stype, raw in sel.execute(
+            "SELECT s.record_id, s.sub_type, s.raw FROM subrecords s "
+            "JOIN records r ON s.record_id = r.id "
+            "WHERE r.plugin_id = ? AND s.sub_type IN (%s)"
+            % ",".join("?" * len(lstring_types)),
+            (pid, *lstring_types),
+        ):
+            if len(raw) != 4:
+                continue
+            (idx,) = struct.unpack("<I", raw)
+            # try each table type in order
+            for ttype in ("STRINGS", "DLSTRINGS", "ILSTRINGS"):
+                text = tables[ttype].get(idx)
+                if text is not None:
+                    ins.execute(
+                        "INSERT INTO resolved_strings (record_id, sub_type, text) VALUES (?, ?, ?)",
+                        (rid, stype, text),
+                    )
+                    count += 1
+                    break
+    conn.commit()
+    return count
 
 
 def start_run(conn: sqlite3.Connection, game_version: str, plugins_md5: str) -> int:
