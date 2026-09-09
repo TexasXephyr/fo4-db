@@ -1,5 +1,0 @@
-Metadata-Version: 2.4
-Name: fo4-db
-Version: 0.1.0
-Summary: Fallout 4 data wiki: canonical SQLite DB of the local game install
-Requires-Python: >=3.10

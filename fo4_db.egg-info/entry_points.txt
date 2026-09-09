@@ -1,2 +1,0 @@
-[console_scripts]
-fo4-db = fo4db.cli:main
