@@ -161,13 +161,22 @@ def cmd_refs(args: list[str]) -> None:
         print(f"  {fid:08X} {rtype:6s} {edid or '':40s} {pname}  [{stype} @{off}]")
 
 
+def cmd_assets(args: list[str]) -> None:
+    """Index BA2 archives (metadata only — never copies file data)."""
+    conn = _connect()
+    data_dir = args[0] if args else os.path.expanduser(
+        "~/snap/steam/common/.local/share/Steam/steamapps/common/Fallout 4/Data_Core"
+    )
+    result = db.index_assets(conn, data_dir)
+    print(f"\nindexed {result.get('_total', 0)} assets across {len(result) - 1} archives")
+
+
 def cmd_resolve(args: list[str]) -> None:
     """Resolve localized lstring indices using .STRINGS tables."""
     conn = _connect()
     strings_dir = args[0] if args else "/tmp/fo4-strings/STRINGS"
     n = db.resolve_localized_strings(conn, strings_dir)
     print(f"resolved {n} strings")
-
 
 def cmd_freshness(args: list[str]) -> None:
     conn = _connect()
@@ -225,7 +234,8 @@ def main() -> None:
     cmd = sys.argv[1]
     args = sys.argv[2:]
     {"ingest": cmd_ingest, "records": cmd_records, "text": cmd_text,
-     "refs": cmd_refs, "resolve": cmd_resolve, "freshness": cmd_freshness, "stats": cmd_stats}.get(cmd, lambda a: print(__doc__))(args)
+     "refs": cmd_refs, "resolve": cmd_resolve, "assets": cmd_assets,
+     "freshness": cmd_freshness, "stats": cmd_stats}.get(cmd, lambda a: print(__doc__))(args)
 
 
 if __name__ == "__main__":

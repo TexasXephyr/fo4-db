@@ -269,6 +269,13 @@ def resolve_localized_strings(conn: sqlite3.Connection, strings_dir: str) -> int
     return count
 
 
+def index_assets(conn: sqlite3.Connection, data_dir: str) -> dict:
+    """Index every BA2 archive in a game data dir. Delegates to assets.py."""
+    from . import assets
+
+    return assets.index_all(conn, data_dir)
+
+
 def start_run(conn: sqlite3.Connection, game_version: str, plugins_md5: str) -> int:
     cur = conn.cursor()
     cur.execute(
