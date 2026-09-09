@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fo4-db"
+version = "0.1.0"
+description = "Fallout 4 data wiki: canonical SQLite DB of the local game install"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+fo4-db = "fo4db.cli:main"
+
+[tool.setuptools]
+packages = ["fo4db"]
