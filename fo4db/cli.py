@@ -171,6 +171,49 @@ def cmd_assets(args: list[str]) -> None:
     print(f"\nindexed {result.get('_total', 0)} assets across {len(result) - 1} archives")
 
 
+def cmd_fields(args: list[str]) -> None:
+    """Decode record types into the fields table (schema layer)."""
+    conn = _connect()
+    from . import schema
+
+    n = schema.build_fields(conn)
+    print(f"decoded {n} fields")
+
+
+def cmd_field(args: list[str]) -> None:
+    """Show decoded fields for one record by EDID or formID."""
+    conn = _connect()
+    cur = conn.cursor()
+    if not args:
+        print("usage: fo4-db field <EDID-or-formID>")
+        return
+    target = args[0]
+    rid = None
+    if target.lower().startswith("0x"):
+        fid = int(target, 16)
+        row = cur.execute("SELECT id FROM records WHERE form_id = ?", (fid,)).fetchone()
+        if row:
+            rid = row[0]
+    else:
+        row = cur.execute("SELECT id FROM records WHERE edid = ?", (target,)).fetchone()
+        if row:
+            rid = row[0]
+    if rid is None:
+        print(f"record {target} not found")
+        return
+    meta = cur.execute(
+        "SELECT r.form_id, r.record_type, r.edid, COALESCE(p.name,'') FROM records r "
+        "JOIN plugins p ON r.plugin_id = p.id WHERE r.id = ?",
+        (rid,),
+    ).fetchone()
+    print(f"{meta[0]:08X} {meta[1]} {meta[2] or ''} [{meta[3]}]")
+    for field, kind, value in cur.execute(
+        "SELECT field, kind, value FROM fields WHERE record_id = ? ORDER BY seq",
+        (rid,),
+    ):
+        print(f"  {field:26s} {kind:6s} {value}")
+
+
 def cmd_resolve(args: list[str]) -> None:
     """Resolve localized lstring indices using .STRINGS tables."""
     conn = _connect()
@@ -235,6 +278,7 @@ def main() -> None:
     args = sys.argv[2:]
     {"ingest": cmd_ingest, "records": cmd_records, "text": cmd_text,
      "refs": cmd_refs, "resolve": cmd_resolve, "assets": cmd_assets,
+     "fields": cmd_fields, "field": cmd_field,
      "freshness": cmd_freshness, "stats": cmd_stats}.get(cmd, lambda a: print(__doc__))(args)
 
 

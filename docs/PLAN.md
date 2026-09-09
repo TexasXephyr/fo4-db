@@ -51,8 +51,9 @@ recorded. Bethesda ships updates → fingerprint changes → re-ingest.
 ## Phases
 
 - [x] P0: inventory existing tools (espdump.py, fo4-plugin-toolkit, BSArch)
-- [ ] P1: fo4-db package + ingestion of vanilla esms (7 files) → fo4.db
-- [ ] P2: query CLI verbs (records, text, refs, freshness)
+- [x] P1: fo4-db package + ingestion of vanilla esms (7 files) → fo4.db
+- [x] P1.5: localized lstring resolution (204K strings)
+- [x] P1.6: BA2 asset index (507K assets, metadata only)
+- [x] P2: schema layer — typed field decoding (ALCH/MGEF/LVLI/COBJ/MISC/KYWD)
 - [ ] P3: DLC + CC + active mods ingestion
-- [ ] P4: BA2 asset index
-- [ ] P5: wiki generation
+- [ ] P4: wiki generation (markdown pages from the DB)
