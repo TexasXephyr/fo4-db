@@ -55,5 +55,11 @@ recorded. Bethesda ships updates → fingerprint changes → re-ingest.
 - [x] P1.5: localized lstring resolution (204K strings)
 - [x] P1.6: BA2 asset index (507K assets, metadata only)
 - [x] P2: schema layer — typed field decoding (ALCH/MGEF/LVLI/COBJ/MISC/KYWD)
-- [ ] P3: DLC + CC + active mods ingestion
+- [ ] **P3 (NEXT): DLC + CC + active mods ingestion** — ingest the 6 DLC
+  esms + 9 CC esls + active mod plugins (CannabisWorld, CCX, etc.) into
+  the same graph. The vanilla-only DB is the foundation; the mods are
+  where the mod project actually lives. Same pipeline: `fo4-db ingest
+  <Data_Core>` already picks up all .esm/.esp/.esl — the remaining work
+  is verifying cross-plugin refs resolve (formID prefix = load order)
+  and re-running `fields`/`resolve` for the new plugins.
 - [ ] P4: wiki generation (markdown pages from the DB)
