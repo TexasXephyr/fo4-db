@@ -281,10 +281,17 @@ def start_run(conn: sqlite3.Connection, game_version: str, plugins_md5: str) -> 
     return cur.lastrowid
 
 
-def finish_run(conn: sqlite3.Connection, run_id: int, rec_count: int, sub_count: int) -> None:
+def finish_run(
+    conn: sqlite3.Connection,
+    run_id: int,
+    rec_count: int,
+    sub_count: int,
+    plugin_count: int | None = None,
+) -> None:
     cur = conn.cursor()
     cur.execute(
-        "UPDATE ingest_runs SET status='done', record_count=?, subrecord_count=? WHERE id=?",
-        (rec_count, sub_count, run_id),
+        "UPDATE ingest_runs SET status='done', record_count=?, subrecord_count=?, "
+        "plugin_count=COALESCE(?, plugin_count) WHERE id=?",
+        (rec_count, sub_count, plugin_count, run_id),
     )
     conn.commit()

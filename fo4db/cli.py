@@ -50,14 +50,35 @@ def _multi(args: list[str], name: str) -> list[str]:
 
 
 def _game_version(game_root: str) -> str:
+    """Read the game version out of Fallout4.exe.
+
+    The string lives in the PE resource section, ~38 MB in — the original
+    first-1-MB scan never found it and every ingest run recorded `unknown`.
+    """
+    import re
+
     exe = os.path.join(game_root, "Fallout4.exe")
-    if os.path.exists(exe):
+    if not os.path.exists(exe):
+        return "unknown"
+    try:
         with open(exe, "rb") as f:
-            data = f.read(1 << 20)
-        for s in data.split(b"\x00"):
-            if s.startswith(b"1.") and b"." in s[2:]:
-                return s.decode("latin1")
-    return "unknown"
+            data = f.read()
+    except OSError:
+        return "unknown"
+    m = re.search(rb"1\.\d{1,2}\.\d{2,3}\.\d{1,3}", data)
+    return m.group().decode("latin1") if m else "unknown"
+
+
+def _game_root(conn: sqlite3.Connection, data_dir: str | None) -> str:
+    """Game root for the version fingerprint, even when ingesting a manifest."""
+    if data_dir:
+        return os.path.dirname(os.path.abspath(data_dir))
+    row = conn.execute("SELECT path FROM plugins WHERE name = 'Fallout4.esm'").fetchone()
+    if row and row[0]:
+        return os.path.dirname(os.path.dirname(row[0]))
+    return os.path.expanduser(
+        "~/snap/steam/common/.local/share/Steam/steamapps/common/Fallout 4"
+    )
 
 
 def _plugins_md5(plugins_txt: str | None) -> str:
@@ -148,7 +169,7 @@ def cmd_ingest(args: list[str]) -> None:
     conn = db.connect(DEFAULT_DB)
     if not dry:
         schema_v2.ensure(conn)
-    run_id = None if dry else db.start_run(conn, _game_version(data_dir or ""), _plugins_md5(plugins_txt))
+    run_id = None if dry else db.start_run(conn, _game_version(_game_root(conn, data_dir)), _plugins_md5(plugins_txt))
 
     order: list[str] = []
     if plugins_txt and os.path.exists(plugins_txt):
@@ -232,7 +253,7 @@ def cmd_ingest(args: list[str]) -> None:
     print("  rebuilding reference map (master-mapped) ...", flush=True)
     assert run_id is not None
     nrefs = db.build_references(conn)
-    db.finish_run(conn, run_id, total_rec, total_sub)
+    db.finish_run(conn, run_id, total_rec, total_sub, len(planned))
     print(
         f"done: {len(planned)} plugins, {total_rec} records, "
         f"{total_sub} subrecords, {nrefs} references"

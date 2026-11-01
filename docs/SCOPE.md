@@ -173,6 +173,15 @@ a reference to a plugin header, and every small count as a reference to
 `DoorMarker`/`TravelMarker`. Those rows are now excluded or demoted, not deleted:
 `refs` and `out` read `confidence='high'` unless `--all` is passed.
 
+**Verified 2026-11-01 (final code).** `tools/p3_acceptance.sh` two purged
+ingests: counts, per-plugin record/subrecord totals and per-plugin ref counts all
+identical; mods contribute CW 263,392 · CC 6,445 · Cigars 507 · CROSS_Halo 343.
+`freshness`: 20 of 20 plugin files unchanged since ingest. Integrity: 0 refs to a
+plugin header, 0 dangling, 0 orphan subrecords, 0 duplicate `(record, sub_type,
+seq)`, 0 open references. `ingest_runs` now records the real game version
+(`1.11.240.0`, read from the PE resource section — the old first-1-MB scan
+returned `unknown` for every run).
+
 ### The defect this round found
 
 The first `refs` v2 implementation re-mapped the *existing* rows through the
