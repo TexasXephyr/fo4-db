@@ -352,9 +352,10 @@ def cmd_refs(args: list[str]) -> None:
     if rid is None:
         print(f"record {target} not found")
         return
-    conf = "" if "--all" in args else " AND x.confidence = 'high'"
+    only_high = "--high" in args
+    conf = " AND x.confidence = 'high'" if only_high else ""
     rows = cur.execute(
-        """SELECT rr.form_id, rr.record_type, rr.edid, pp.name, x.sub_type, x.offset
+        """SELECT rr.form_id, rr.record_type, rr.edid, pp.name, x.sub_type, x.offset, x.confidence
            FROM refs x
            JOIN records rr ON x.record_id = rr.id
            JOIN plugins pp ON rr.plugin_id = pp.id
@@ -362,10 +363,13 @@ def cmd_refs(args: list[str]) -> None:
            ORDER BY rr.form_id LIMIT 100""",
         (rid,),
     ).fetchall()
-    print(f"references to {target} (record id {rid}): {len(rows)}"
-          + ("" if "--all" in args else "  [high-confidence; --all includes numeric-field noise]"))
-    for fid, rtype, edid, pname, stype, off in rows:
-        print(f"  {fid:08X} {rtype:6s} {edid or '':40s} {pname}  [{stype} @{off}]")
+    print(
+        f"references to {target} (record id {rid}): {len(rows)}"
+        + ("  [high-confidence only]" if only_high else "  ([low] = target id under 0x800; may be a numeric field)")
+    )
+    for fid, rtype, edid, pname, stype, off, c in rows:
+        mark = "" if c == "high" else "  [low]"
+        print(f"  {fid:08X} {rtype:6s} {edid or '':40s} {pname}  [{stype} @{off}]{mark}")
 
 
 def cmd_out(args: list[str]) -> None:
@@ -379,9 +383,11 @@ def cmd_out(args: list[str]) -> None:
     if rid is None:
         print(f"record {target} not found")
         return
-    conf = "" if "--all" in args else " AND x.confidence = 'high'"
+    only_high = "--high" in args
+    conf = " AND x.confidence = 'high'" if only_high else ""
     rows = cur.execute(
-        """SELECT x.sub_type, x.offset, x.target_local, tp.name, tr.record_type, tr.edid, x.open_plugin
+        """SELECT x.sub_type, x.offset, x.target_local, tp.name, tr.record_type, tr.edid, x.open_plugin,
+                  x.confidence
            FROM refs x
            LEFT JOIN plugins tp ON x.target_plugin_id = tp.id
            LEFT JOIN records tr ON x.resolved_record_id = tr.id
@@ -389,12 +395,15 @@ def cmd_out(args: list[str]) -> None:
            ORDER BY x.offset LIMIT 200""",
         (rid,),
     ).fetchall()
-    print(f"{target} points at {len(rows)}"
-          + ("" if "--all" in args else "  [high-confidence; --all includes numeric-field noise]"))
-    for stype, off, local, tname, rtype, edid, openp in rows:
+    print(
+        f"{target} points at {len(rows)}"
+        + ("  [high-confidence only]" if only_high else "  ([low] = target id under 0x800; may be a numeric field)")
+    )
+    for stype, off, local, tname, rtype, edid, openp, c in rows:
         who = tname or openp or "?"
         what = f"{rtype}:{edid}" if rtype else ("OPEN" if openp else "absent")
-        print(f"  [{stype} @{off:>3}] {who}:{local:06X}  {what}")
+        mark = "" if c == "high" else "  [low]"
+        print(f"  [{stype} @{off:>3}] {who}:{local:06X}  {what}{mark}")
 
 
 def cmd_open_refs(args: list[str]) -> None:

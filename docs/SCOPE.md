@@ -170,8 +170,18 @@ Applied to `fo4.db` after a `.backup` to `fo4.db.bak-preP3-20261031`.
 
 The ref count fell by 12M because the v1 map counted every zero-valued field as
 a reference to a plugin header, and every small count as a reference to
-`DoorMarker`/`TravelMarker`. Those rows are now excluded or demoted, not deleted:
-`refs` and `out` read `confidence='high'` unless `--all` is passed.
+`DoorMarker`/`TravelMarker`. Those rows are demoted, not deleted: `refs` and
+`out` print every resolved row and mark targets whose id is under `0x800` as
+`[low]`; `--high` filters them out.
+
+**The first cut of that rule hid real references** and this is worth remembering:
+it filtered `[low]` rows by default, which was calibrated on vanilla, where ids
+under `0x800` are engine markers. Cannabis World numbers its own records from
+`0x0001` — 1,090 of them sit below `0x800` — so 3,343 genuine references to CW
+records were being hidden, including the vanilla leveled lists its chems are
+injected into (`420X_ChillJetSourDiesel` ← `Container_Loot_Medkit_Chems`,
+`LLI_Vendor_Chems_Rare`, …). Default now shows all, marks the doubtful, filters
+only on request.
 
 **Verified 2026-11-01 (final code).** `tools/p3_acceptance.sh` two purged
 ingests: counts, per-plugin record/subrecord totals and per-plugin ref counts all
