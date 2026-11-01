@@ -3,4 +3,5 @@ __pycache__/
 *.pyc
 *.egg-info/
 fo4.db
+fo4.db.bak-*
 *.db-journal

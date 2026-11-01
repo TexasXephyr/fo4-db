@@ -107,16 +107,43 @@ def ingest_plugin(
     path: str,
     load_order: Optional[int] = None,
     ingest_run: Optional[int] = None,
+    source: Optional[str] = None,
 ) -> dict:
-    """Ingest one plugin file into the DB. Returns record/subrecord counts."""
+    """Ingest one plugin file into the DB. Returns record/subrecord counts.
+
+    The plugin row is updated in place when the file is already known, so record
+    ids survive a re-ingest; run `schema_v2.purge_plugin` first, or the plugin's
+    old records, subrecords and strings remain alongside the new ones.
+    """
+    from . import masters as masters_mod
+
     name = os.path.basename(path)
     cur = conn.cursor()
-    cur.execute(
-        "INSERT OR REPLACE INTO plugins (name, path, md5, size, load_order, ingest_run) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        (name, path, md5_file(path), os.path.getsize(path), load_order, ingest_run),
+    flags, mast = masters_mod.read_tes4(path)
+    is_light = 1 if flags & masters_mod.LIGHT_FLAG else 0
+    md5 = md5_file(path)
+    size = os.path.getsize(path)
+
+    row = cur.execute("SELECT id FROM plugins WHERE name = ?", (name,)).fetchone()
+    if row is None:
+        cur.execute(
+            "INSERT INTO plugins (name, path, md5, size, load_order, ingest_run, is_light, source) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (name, path, md5, size, load_order, ingest_run, is_light, source),
+        )
+        plugin_id = cur.lastrowid
+    else:
+        plugin_id = row[0]
+        cur.execute(
+            "UPDATE plugins SET path = ?, md5 = ?, size = ?, load_order = ?, "
+            "ingest_run = ?, is_light = ?, source = ? WHERE id = ?",
+            (path, md5, size, load_order, ingest_run, is_light, source, plugin_id),
+        )
+    cur.execute("DELETE FROM plugin_masters WHERE plugin_id = ?", (plugin_id,))
+    cur.executemany(
+        "INSERT INTO plugin_masters (plugin_id, idx, name) VALUES (?, ?, ?)",
+        [(plugin_id, i, m) for i, m in enumerate(mast)],
     )
-    plugin_id = cur.execute("SELECT id FROM plugins WHERE name = ?", (name,)).fetchone()[0]
 
     rec_count = 0
     sub_count = 0
@@ -153,49 +180,16 @@ def ingest_plugin(
 
 
 def build_references(conn: sqlite3.Connection) -> int:
-    """Scan every record body for u32 words that match known formIDs.
+    """Rebuild the reference map through each plugin's master list.
 
-    A word is a reference if it matches any known formID in the DB
-    (cross-plugin refs included). This is the raw reference map — the
-    wiki's "what points at what" backbone.
-
-    Performance: walks the plugin FILES in memory (like ingestion) and
-    batch-inserts. The per-record SQLite round-trip version took >10
-    minutes on 2.2M records and was killed (2026-09-09).
+    P3 (2026-10-31): replaced the v1 flat-set word matcher, which could not tell
+    one plugin's local formID from another's. See `fo4db.refs`. Returns the
+    number of rows after the rebuild.
     """
-    cur = conn.cursor()
-    cur.execute("DELETE FROM refs")
-    known: set[int] = set()
-    for (fid,) in cur.execute("SELECT form_id FROM records"):
-        known.add(fid)
+    from . import refs as refs_mod
 
-    # plugin_id -> file path
-    paths = dict(cur.execute("SELECT id, path FROM plugins"))
-
-    rows: list[tuple[int, str, int, int]] = []
-    for pid, path in paths.items():
-        # record form_id -> record id for this plugin
-        fid_to_rid = dict(
-            cur.execute("SELECT form_id, id FROM records WHERE plugin_id = ?", (pid,))
-        )
-        for rec in parser.walk(path):
-            if rec.is_grup:
-                continue
-            rid = fid_to_rid.get(rec.form_id)
-            if rid is None:
-                continue
-            for sub in parser.subrecords(rec.data):
-                n = len(sub.data) // 4
-                for i in range(n):
-                    (word,) = struct.unpack("<I", sub.data[i * 4 : i * 4 + 4])
-                    if word in known:
-                        rows.append((rid, sub.stype, i * 4, word))
-    cur.executemany(
-        "INSERT INTO refs (record_id, sub_type, offset, target_form_id) VALUES (?, ?, ?, ?)",
-        rows,
-    )
-    conn.commit()
-    return len(rows)
+    stats = refs_mod.rebuild(conn)
+    return stats["refs_after"]
 
 
 def resolve_localized_strings(conn: sqlite3.Connection, strings_dir: str) -> int:
@@ -269,11 +263,11 @@ def resolve_localized_strings(conn: sqlite3.Connection, strings_dir: str) -> int
     return count
 
 
-def index_assets(conn: sqlite3.Connection, data_dir: str) -> dict:
+def index_assets(conn: sqlite3.Connection, data_dir: str, owner: str = "game") -> dict:
     """Index every BA2 archive in a game data dir. Delegates to assets.py."""
     from . import assets
 
-    return assets.index_all(conn, data_dir)
+    return assets.index_all(conn, data_dir, owner=owner)
 
 
 def start_run(conn: sqlite3.Connection, game_version: str, plugins_md5: str) -> int:

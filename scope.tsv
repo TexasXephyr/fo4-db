@@ -1,0 +1,8 @@
+# fo4-db P3 scope manifest — the ONLY plugins the library ingests from mods.
+# Format: <plugin file name> <TAB> <folder under the mod store, or full path>
+# Rule and rationale: docs/SCOPE.md. Decision record: docs/PLAN_P3.md.
+# Cannabis World is a work in progress; re-run `ingest --manifest` after each build.
+CannabisWorld.esp	Cannabis World
+Cannabis Commonwealth.esp	Cannabis Commonwealth - No AWKCR-AE and SKE - SMM
+CROSS_Halo.esp	CROSS_Halo_090a
+Smoke-able Cigars.esp	Smokeable Cigars - Cigarettes - Joints

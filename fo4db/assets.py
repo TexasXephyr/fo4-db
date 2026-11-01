@@ -141,7 +141,14 @@ def read_names(f, names_offset: int, count: int) -> list[str]:
     return names
 
 
-def index_archive(conn: sqlite3.Connection, archive_path: str, archive: str, cur: sqlite3.Cursor) -> int:
+def index_archive(
+    conn: sqlite3.Connection,
+    archive_path: str,
+    archive: str,
+    cur: sqlite3.Cursor,
+    owner: str = "game",
+    source_md5: str | None = None,
+) -> int:
     """Index one archive (seek-only, no decompression). Returns file count."""
     with open(archive_path, "rb") as f:
         magic, version, atype, file_count, names_offset = struct.unpack(
@@ -159,29 +166,119 @@ def index_archive(conn: sqlite3.Connection, archive_path: str, archive: str, cur
             (
                 archive, archive_path, name, rec.ext,
                 rec.unpacked, rec.packed, rec.offset, rec.hash,
+                owner, "archive", 0, source_md5, normalise(name),
             )
         )
     cur.executemany(
         "INSERT OR REPLACE INTO assets "
-        "(archive, archive_path, path, ext, size, packed_size, offset, hash) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "(archive, archive_path, path, ext, size, packed_size, offset, hash, "
+        " owner, source_kind, precedence, source_md5, path_norm) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         rows,
     )
     return len(rows)
 
 
-def index_all(conn: sqlite3.Connection, data_dir: str) -> dict:
-    """Index every BA2 in a game data dir. Returns {archive: file_count}."""
+def normalise(path: str) -> str:
+    """Case- and separator-insensitive key the game also uses."""
+    return path.replace("/", "\\").lower()
+
+
+def index_source(conn: sqlite3.Connection, owner: str, mod_dir: str, cur: sqlite3.Cursor | None = None) -> dict:
+    """Index one mod: its BA2 archives plus its loose `Data/` tree.
+
+    Loose files carry precedence 1 so a query can tell that the same mod ships
+    the file twice and which copy the engine reads (`bInvalidateOlderFiles=1`).
+    Loose coverage is not optional: Cannabis World ships 204 loose files, 33 of
+    which shadow its own `- Main.ba2`, and Smoke-able Cigars ships no BA2 at all.
+    """
+    import hashlib
+
+    cur = cur or conn.cursor()
+    result: dict[str, int] = {}
+
+    archives = sorted(
+        p for p in glob.glob(os.path.join(mod_dir, "*"))
+        if p.lower().endswith(".ba2")
+    )
+    for ap in archives:
+        archive = os.path.basename(ap)
+        h = hashlib.md5()
+        with open(ap, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+        try:
+            n = index_archive(conn, ap, archive, cur, owner=owner, source_md5=h.hexdigest())
+            result[archive] = n
+            print(f"  [{owner}] {archive}: {n} entries  md5={h.hexdigest()[:12]}", flush=True)
+        except Exception as e:  # noqa: BLE001 — one bad archive must not kill the pass
+            print(f"  [{owner}] {archive}: ERROR {e}", flush=True)
+
+    # loose pass: the mod's overlay root is Data/ when present, else the mod root
+    loose_root = os.path.join(mod_dir, "Data")
+    if not os.path.isdir(loose_root):
+        loose_root = mod_dir
+    loose = 0
+    shadowed = 0
+    archive_keys = {
+        row[0]
+        for row in cur.execute(
+            "SELECT path_norm FROM assets WHERE owner = ? AND source_kind = 'archive'", (owner,)
+        )
+    }
+    rows = []
+    for dirpath, _dirnames, filenames in os.walk(loose_root):
+        for fn in filenames:
+            p = os.path.join(dirpath, fn)
+            rel = os.path.relpath(p, loose_root)
+            if rel.lower().endswith((".ba2", ".esp", ".esm", ".esl", ".meta.ini")):
+                continue
+            if fn.lower() in ("meta.ini", "readme.txt", "readme.md"):
+                continue
+            key = normalise(rel)
+            shadow = 1 if key in archive_keys else 0
+            shadowed += shadow
+            h = hashlib.md5()
+            try:
+                with open(p, "rb") as f:
+                    for chunk in iter(lambda: f.read(1 << 20), b""):
+                        h.update(chunk)
+            except OSError:
+                continue
+            rows.append(
+                (
+                    owner, p, rel, os.path.splitext(fn)[1].lstrip(".").lower(),
+                    os.path.getsize(p), 0, 0, 0,
+                    owner, "loose", 1, h.hexdigest(), key,
+                )
+            )
+            loose += 1
+    cur.executemany(
+        "INSERT OR REPLACE INTO assets "
+        "(archive, archive_path, path, ext, size, packed_size, offset, hash, "
+        " owner, source_kind, precedence, source_md5, path_norm) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        rows,
+    )
+    conn.commit()
+    result["_loose"] = loose
+    result["_shadowed_by_loose"] = shadowed
+    print(f"  [{owner}] loose files: {loose}  shadowing own archives: {shadowed}", flush=True)
+    return result
+
+
+def index_all(conn: sqlite3.Connection, data_dir: str, owner: str = "game") -> dict:
+    """Index every BA2 in a game data dir, replacing that owner's rows only."""
     cur = conn.cursor()
-    cur.execute("DROP TABLE IF EXISTS assets")
-    conn.executescript(ASSETS_SCHEMA)
+    cur.execute("DELETE FROM assets WHERE owner = ?", (owner,))
+    conn.commit()
     archives = find_archives(data_dir)
-    result = {}
+    result: dict[str, int] = {}
     total = 0
     for ap in archives:
         archive = os.path.basename(ap)
         try:
-            n = index_archive(conn, ap, archive, cur)
+            n = index_archive(conn, ap, archive, cur, owner=owner)
             result[archive] = n
             total += n
             print(f"  {archive}: {n} files", flush=True)
