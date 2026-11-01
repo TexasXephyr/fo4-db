@@ -19,11 +19,19 @@ Layouts verified against real bytes in fo4.db (2026-09-09):
 
 The MGEF DATA flags table is authoritative from the fo4-mgef-flags skill
 (verified byte-level 2026-09-03) — do NOT re-fetch the wiki.
+
+P3 (2026-11-01): reference resolution is per plugin. A 4-byte word's top byte
+indexes the WRITING plugin's own MAST list, so `0x0002F3` in CannabisWorld.esp
+is "Fallout4.esm record 0x0002F3" while `0x0102F3` is one of its own. Resolving
+against a flat formID table picked whichever row happened to sort first, and the
+mods' records had never been decoded at all. Both are fixed here, and the
+resolution rules are identical to `fo4db.refs.resolve_word`.
 """
 from __future__ import annotations
 
 import sqlite3
 import struct
+from functools import partial
 
 FIELDS_SCHEMA = """
 CREATE TABLE IF NOT EXISTS fields (
@@ -62,18 +70,83 @@ MGEF_FLAGS = {
 
 LSTRING_TYPES = ("FULL", "DESC", "SNAM", "BTXT", "ITXT", "TNAM", "RNAM", "INAM", "UNAM", "MNAM", "NNAM", "XNAM", "CNAM", "ANAM")
 
+LOCAL_MASK = 0x00FFFFFF
+
+
+class RefResolver:
+    """Resolve a formID word written by a given plugin to a readable name.
+
+    Same identity rule as `fo4db.refs.resolve_word`, with `(plugin, local id)`
+    as the key and the plugin's own definition preferred over a master override.
+    Meta (record type + EDID) is fetched lazily and cached, because the number of
+    distinct targets referenced by decoded records is small.
+    """
+
+    def __init__(self, cur: sqlite3.Cursor):
+        self._cur = cur
+        self.name_by_id = {pid: n for pid, n in cur.execute("SELECT id, name FROM plugins")}
+        self.id_by_name = {n: p for p, n in self.name_by_id.items()}
+        self.masters: dict[int, list[str]] = {}
+        for pid, _idx, mname in cur.execute(
+            "SELECT plugin_id, idx, name FROM plugin_masters ORDER BY plugin_id, idx"
+        ):
+            self.masters.setdefault(pid, []).append(mname)
+        self.rid_own: dict[tuple[int, int], int] = {}
+        self.rid_any: dict[tuple[int, int], int] = {}
+        for pid, form_id, rtype, rid in cur.execute(
+            "SELECT plugin_id, form_id, record_type, id FROM records"
+        ):
+            if rtype == "TES4":
+                continue
+            key = (pid, form_id & LOCAL_MASK)
+            if (form_id >> 24) == len(self.masters.get(pid) or []):
+                self.rid_own.setdefault(key, rid)
+            else:
+                self.rid_any.setdefault(key, rid)
+        self._meta: dict[int, str] = {}
+
+    def _meta_of(self, rid: int) -> str:
+        if rid not in self._meta:
+            row = self._cur.execute(
+                "SELECT record_type, COALESCE(edid, '') FROM records WHERE id = ?", (rid,)
+            ).fetchone()
+            self._meta[rid] = f"{row[0]}:{row[1]}" if row else "?"
+        return self._meta[rid]
+
+    def resolve(self, pid: int, word: int) -> str:
+        mast = self.masters.get(pid) or []
+        idx = (word >> 24) & 0xFF
+        local = word & LOCAL_MASK
+        if idx > len(mast):
+            return f"{word:08X} (beyond own slot)"
+        if idx < len(mast):
+            tname = mast[idx]
+            tpid = self.id_by_name.get(tname)
+            if tpid is None:
+                return f"{tname}:{local:06X} (open)"
+        else:
+            tpid = pid
+            tname = self.name_by_id.get(pid, "?")
+        rid = self.rid_own.get((tpid, local))
+        if rid is None:
+            rid = self.rid_any.get((tpid, local))
+        if rid is None:
+            return f"{tname}:{local:06X} (absent)"
+        return f"{tname}:{local:06X} {self._meta_of(rid)}"
+
 
 def _resolve_ref(conn: sqlite3.Connection, form_id: int) -> str:
-    """Resolve a formID to EDID + type for display."""
-    cur = conn.cursor()
-    row = cur.execute(
+    """Legacy flat lookup, kept only as `decode_record`'s fallback.
+
+    Wrong for mod content by construction — two plugins can own the same local
+    id. Use `RefResolver.resolve` for anything real.
+    """
+    row = conn.execute(
         "SELECT r.record_type, COALESCE(r.edid, '') FROM records r "
         "WHERE r.form_id = ? GROUP BY r.record_type, r.edid LIMIT 1",
         (form_id,),
     ).fetchone()
-    if row:
-        return f"{form_id:08X} {row[0]}:{row[1]}"
-    return f"{form_id:08X}"
+    return f"{form_id:08X} {row[0]}:{row[1]}" if row else f"{form_id:08X}"
 
 
 def _decode_mgef_flags(value: int) -> str:
@@ -81,10 +154,12 @@ def _decode_mgef_flags(value: int) -> str:
     return " | ".join(names) if names else "none"
 
 
-def decode_record(conn: sqlite3.Connection, rid: int, rtype: str, subs: list[tuple[str, int, bytes]], resolve=None) -> list[tuple]:
+def decode_record(conn, rid: int, rtype: str, subs: list[tuple[str, int, bytes]], resolve=None) -> list[tuple]:
     """Decode one record's subrecords into (field, kind, value, seq) rows."""
     if resolve is None:
-        resolve = lambda fid: _resolve_ref(conn, fid)
+        if conn is None:
+            raise ValueError("decode_record needs either a resolve callable or a connection")
+        resolve = partial(_resolve_ref, conn)
     out: list[tuple] = []
     sub_map: dict[str, list[bytes]] = {}
     for st, seq, raw in subs:
@@ -135,18 +210,34 @@ def decode_record(conn: sqlite3.Connection, rid: int, rtype: str, subs: list[tup
             if len(lvlo) >= 12:
                 level, _u, ref, count, _u2 = struct.unpack("<HHIHH", lvlo[:12])
                 out.append((f"entry[{i}].level", "u16", str(level), 10 + i))
-                out.append((f"entry[{i}].ref", "ref", _resolve_ref(conn, ref), 10 + i))
+                out.append((f"entry[{i}].ref", "ref", resolve(ref), 10 + i))
                 out.append((f"entry[{i}].count", "u16", str(count), 10 + i))
 
     elif rtype == "COBJ":
         if "CNAM" in sub_map and len(sub_map["CNAM"][0]) >= 4:
             (ref,) = struct.unpack("<I", sub_map["CNAM"][0][:4])
-            out.append(("result", "ref", _resolve_ref(conn, ref), 0))
-        for i, cnto in enumerate(sub_map.get("CNTO", [])):
-            if len(cnto) >= 8:
-                ref, count = struct.unpack("<II", cnto[:8])
-                out.append((f"component[{i}].ref", "ref", _resolve_ref(conn, ref), 20 + i))
-                out.append((f"component[{i}].count", "u32", str(count), 20 + i))
+            out.append(("result", "ref", resolve(ref), 0))
+        # Fallout 4 stores recipe components as FVPA pairs (ref u32, count u32).
+        # One FVPA subrecord can hold 1..5 pairs (8..40 bytes), so the pairs are
+        # flattened across every FVPA in the record. The Skyrim-era CNTO never
+        # appears: zero COBJ records in this database have one, which is why the
+        # first pass decoded recipes with no components at all.
+        pairs: list[tuple[int, int]] = []
+        for fvpa in sub_map.get("FVPA", []):
+            for off in range(0, len(fvpa) - 7, 8):
+                pairs.append(struct.unpack("<II", fvpa[off : off + 8]))
+        for i, (ref, count) in enumerate(pairs):
+            out.append((f"component[{i}].ref", "ref", resolve(ref), 20 + i))
+            out.append((f"component[{i}].count", "u32", str(count), 20 + i))
+        if "BNAM" in sub_map and len(sub_map["BNAM"][0]) >= 4:
+            (ref,) = struct.unpack("<I", sub_map["BNAM"][0][:4])
+            out.append(("workbench", "ref", resolve(ref), 90))
+        if "FNAM" in sub_map and len(sub_map["FNAM"][0]) >= 4:
+            (ref,) = struct.unpack("<I", sub_map["FNAM"][0][:4])
+            out.append(("category", "ref", resolve(ref), 91))
+        if "INTV" in sub_map and len(sub_map["INTV"][0]) >= 4:
+            (n,) = struct.unpack("<I", sub_map["INTV"][0][:4])
+            out.append(("produced", "u32", str(n), 92))
 
     elif rtype == "MISC":
         if "DATA" in sub_map and len(sub_map["DATA"][0]) >= 4:
@@ -162,20 +253,21 @@ def decode_record(conn: sqlite3.Connection, rid: int, rtype: str, subs: list[tup
     return out
 
 
-def build_fields(conn: sqlite3.Connection, limit_types: tuple[str, ...] | None = None) -> int:
+def build_fields(conn: sqlite3.Connection, limit_types: tuple[str, ...] | None = None) -> dict:
     """Decode all records of the supported types into the fields table.
 
-    Performance: one bulk subrecords query grouped in Python, one
-    memoized resolve per unique referenced formID. The first version
-    (per-record query + per-ref query) took > 300s and timed out
-    (2026-09-09).
+    Every plugin is decoded, mods included, and each record's references are
+    resolved in its own plugin's master-list context.
+
+    Performance: one bulk subrecords query grouped in Python, then one decode per
+    record. The first version (per-record query + per-ref query) took > 300s and
+    timed out (2026-09-09).
     """
     cur = conn.cursor()
     cur.execute("DROP TABLE IF EXISTS fields")
     conn.executescript(FIELDS_SCHEMA)
     types = limit_types or ("ALCH", "MGEF", "LVLI", "COBJ", "MISC", "KYWD")
 
-    # bulk: all subrecords for the target types, grouped by record_id
     subs_by_record: dict[int, list[tuple[str, int, bytes]]] = {}
     for rid, st, seq, raw in cur.execute(
         "SELECT s.record_id, s.sub_type, s.seq, s.raw FROM subrecords s "
@@ -186,39 +278,35 @@ def build_fields(conn: sqlite3.Connection, limit_types: tuple[str, ...] | None =
     ):
         subs_by_record.setdefault(rid, []).append((st, seq, raw))
 
-    # all record types in one bulk dict
-    rec_types = dict(cur.execute(
-        "SELECT id, record_type FROM records WHERE record_type IN (%s)" % ",".join("?" * len(types)),
-        types,
-    ))
+    rec_meta = {
+        rid: (rtype, pid)
+        for rid, rtype, pid in cur.execute(
+            "SELECT id, record_type, plugin_id FROM records WHERE record_type IN (%s)"
+            % ",".join("?" * len(types)),
+            types,
+        )
+    }
 
-    # memo: formID -> "TYPE:EDID" (one query per unique ref, not per ref)
-    ref_cache: dict[int, str] = {}
-
-    def resolve_ref(form_id: int) -> str:
-        if form_id not in ref_cache:
-            row = cur.execute(
-                "SELECT r.record_type, COALESCE(r.edid, '') FROM records r "
-                "WHERE r.form_id = ? GROUP BY r.record_type, r.edid LIMIT 1",
-                (form_id,),
-            ).fetchone()
-            ref_cache[form_id] = (
-                f"{form_id:08X} {row[0]}:{row[1]}" if row else f"{form_id:08X}"
-            )
-        return ref_cache[form_id]
-
+    resolver = RefResolver(cur)
     rows: list[tuple] = []
+    per_plugin: dict[int, int] = {}
     for rid, subs in subs_by_record.items():
-        rtype = rec_types.get(rid)
-        if rtype is None:
+        meta = rec_meta.get(rid)
+        if meta is None:
             continue
-        decoded = decode_record(conn, rid, rtype, subs, resolve=resolve_ref)
+        rtype, pid = meta
+        decoded = decode_record(None, rid, rtype, subs, resolve=partial(resolver.resolve, pid))
         for field, kind, value, seq in decoded:
             rows.append((rid, field, kind, value, seq))
+        per_plugin[pid] = per_plugin.get(pid, 0) + 1
 
     cur.executemany(
         "INSERT INTO fields (record_id, field, kind, value, seq) VALUES (?, ?, ?, ?, ?)",
         rows,
     )
     conn.commit()
-    return len(rows)
+    return {
+        "rows": len(rows),
+        "records": sum(per_plugin.values()),
+        "by_plugin": {resolver.name_by_id.get(p, str(p)): n for p, n in per_plugin.items()},
+    }

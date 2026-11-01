@@ -197,6 +197,45 @@ the **excluded** `SKE-AWKCR-AE-VIS v1.3` CC build because name lookup took the
 first filesystem match. Caught by md5 against the manifest expectation; lookup
 now refuses ambiguity and lists candidates.
 
+## P3-G — the typed layer covers the mods (2026-11-01)
+
+`fo4-db fields` re-decodes every plugin, mods included, and resolves each
+record's references in its own plugin's master-list context (`schema.RefResolver`,
+same identity rule as `refs.resolve_word`). Coverage is the six P2 types —
+ALCH, MGEF, LVLI, COBJ, MISC, KYWD.
+
+| | before | after |
+|---|---|---|
+| fields rows | 71,706 | **127,724** |
+| records decoded | 17,282 (vanilla only) | **18,327** (all 20 plugins) |
+| reference values resolved | — | 42,345 of 42,347 |
+| decoded per mod | — | CW 1,045 · CC 407 · Cigars 37 · CROSS_Halo 27 |
+
+Two defects in the P2 decoder were exposed and fixed by running it against real
+mod content:
+
+1. **COBJ components were never decoded.** Fallout 4 stores recipe components as
+   `FVPA` pairs (ref u32, count u32), 1–5 pairs per subrecord; the decoder
+   looked for the Skyrim-era `CNTO`, which appears **zero** times in this
+   database. Every recipe in the library read "result, no components". Now a
+   recipe resolves components, workbench keyword, category keyword and produced
+   count.
+2. **Reference resolution was flat**, so `0x0002F3` in a mod was looked up as a
+   bare formID and could return a vanilla record at the same number. It now
+   resolves to `PLUGIN:LOCAL TYPE:EDID`, and the two values that do not resolve
+   are named `(absent)` rather than filled with a wrong record.
+
+The two absent references are real findings, not artefacts: `Cannabis
+Commonwealth.esp` `LLS_Armor_Raider_Headpart_Facewear` entry[4] points at its own
+`0x003F1A`, which exists in neither the mod nor `Fallout4.esm` (the flat resolver
+would have quietly returned DLCCoast's REFR at `0x01003F1A`); and
+`DLCCoast.esm` has one leveled-list entry pointing at `0x048856`, which that DLC
+does not contain.
+
+`ingest` now rebuilds `fields` as part of the run (~3 s), so a purge+ingest after
+a Cannabis World rebuild keeps the typed layer consistent without a second
+command.
+
 ## Acceptance test for the refresh
 
 ```

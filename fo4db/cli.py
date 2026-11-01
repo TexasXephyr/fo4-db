@@ -253,10 +253,13 @@ def cmd_ingest(args: list[str]) -> None:
     print("  rebuilding reference map (master-mapped) ...", flush=True)
     assert run_id is not None
     nrefs = db.build_references(conn)
+    from . import schema as schema_mod
+
+    fld = schema_mod.build_fields(conn)
     db.finish_run(conn, run_id, total_rec, total_sub, len(planned))
     print(
         f"done: {len(planned)} plugins, {total_rec} records, "
-        f"{total_sub} subrecords, {nrefs} references"
+        f"{total_sub} subrecords, {nrefs} references, {fld['rows']} typed fields"
     )
 
 
@@ -461,8 +464,10 @@ def cmd_fields(args: list[str]) -> None:
     conn = _connect()
     from . import schema
 
-    n = schema.build_fields(conn)
-    print(f"decoded {n} fields")
+    res = schema.build_fields(conn)
+    print(f"decoded {res['rows']} fields across {res['records']} records")
+    for name, n in sorted(res["by_plugin"].items(), key=lambda kv: -kv[1]):
+        print(f"  {name:44s} {n:5d} records")
 
 
 def cmd_field(args: list[str]) -> None:
